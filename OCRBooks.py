@@ -1,9 +1,13 @@
 from PIL import Image
-import pytesseract
 import os
 import argparse
 from ebooklib import epub
+from natsort import natsorted 
+from google.cloud import vision
+from google.cloud.vision_v1 import types
+import io
 
+client = vision.ImageAnnotatorClient.from_service_account_json("/home/madam/bookgeneration-7b7f6b9fe703.json")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-p", "--path", type=str, required=True)
@@ -27,7 +31,7 @@ book.add_author(args.author)
 toc_items = []
 
 # Loop through each subfolder in the main folder
-for chapter_folder in os.listdir(args.path):
+for chapter_folder in natsorted(os.listdir(args.path)):
     chapter_path = os.path.join(args.path, chapter_folder)
     if not os.path.isdir(chapter_path):
         continue
@@ -43,16 +47,60 @@ for chapter_folder in os.listdir(args.path):
 
         # Extract text from the image using pytesseract
         image_path = os.path.join(chapter_path, image_file)
-        text += pytesseract.image_to_string(Image.open(image_path), lang='eng')
+        with io.open(image_path, 'rb') as image_file:
+            content = image_file.read()
+        image = types.Image(content=content)
+        response = client.text_detection(image=image)
+        text_annotations = response.text_annotations
+        text += text_annotations[0].description
+    # Split the text into lines
+    lines = text.split('\n')
 
-    # Add the text to the chapter in the ebook
-    text = text.replace('\n', '<br>')
-    chapter.content = "<p>" + text + "</p>"
+    # Loop through the lines and remove any line that has only one character
+    new_lines = []
+    for line in lines:
+        if len(line.strip()) > 1:
+            new_lines.append(line)
+        else:
+            if(len(new_lines) > 0 ):
+                if (new_lines[0].lower()).startswith("chapter"):
+                    if len(new_lines) > 1:
+                        new_lines[1] ='\n' + line + new_lines[1]
+                    else:
+                        new_lines.append(line)  
+                else:
+                    if len(new_lines) > 1:
+                        new_lines[0] = '\n' + line + new_lines[0]
+                    else:
+                        new_lines.append(line)
+            else:
+                new_lines.append(line)
+
+    if (new_lines[0].lower()).startswith("chapter"):
+        if len(new_lines[1].strip()) < 3:
+            new_lines[2] = '\n' + new_lines[1] + new_lines[2]
+            new_lines.pop(1)
+        new_lines[0] += "\n"
+    else:
+        if len(new_lines[0].strip()) < 3:
+            if (new_lines[1].lower()).startswith("chapter"):
+                new_lines[2] = '\n' + new_lines[0] + new_lines[2]
+                new_lines.pop(0)
+            else:
+                new_lines[1] = '\n' + new_lines[0] + new_lines[1]
+                new_lines.pop(0)
+    
+
+    # Combine the lines into a single string
+    new_text = '\n'.join(new_lines)
+    new_text = new_text.replace("\n", "<br>")
+    chapter.content = "<p>" + new_text + "</p>"
 
     book.add_item(chapter)
     toc_item = epub.Link(chapter_folder+'.xhtml', chapter_folder, chapter_folder+'.xhtml')
     toc_items.append(toc_item)
     book.toc += [toc_item]
+    print(chapter_folder + " finished")
 
   
 # Set the table of contents
@@ -92,3 +140,5 @@ book.spine.pop()
 # Save the ebook to a file
 epub.write_epub(outputfile, book, {})
 print(outputfile)
+
+
